@@ -1,0 +1,121 @@
+#!/bin/sh
+#
+# multipass COMMAND ...
+#
+# Commands:
+#   setup NAME  - create a new master key and first encrypted key
+#   get         - decrypt the master key with a passphrase
+#   add NAME    - add a new passphrase for the master key
+#   del NAME    - delete a passphrase
+#   list        - list available passphrases
+
+set -eu
+
+self="$0"
+
+[ ! -r /etc/default/multipass ] || . /etc/default/multipass
+
+KEYS_DIR="${KEYS_DIR:-/etc/multipass}"
+KEY_LEN="${KEY_LEN:-32}"
+PROMPT="${PROMPT:-Encryption Passphrase}"
+ENCRYPT="${ENCRYPT:-openssl enc -aes-256-cbc -pbkdf2 -salt}"
+DECRYPT="${DECRYPT:-openssl enc -d -aes-256-cbc -pbkdf2 -pass stdin -in}"
+
+usage()
+{
+	# print the header of the file
+	sed -n '1,2d; /^#/!q; s/^# \{0,1\}//p' "$self"
+	exit "${1:-0}"
+}
+
+setup()
+{
+	name="$1"
+	mkdir -p "$KEYS_DIR"
+
+	for file in "$KEYS_DIR"/*.enc; do
+		if [ -e "$file" ]; then
+			echo >&2 Error: There are already existing keys.
+			return 1
+		fi
+	done
+
+	dd if=/dev/urandom bs="${KEY_LEN}" count=1 status=none |
+		$ENCRYPT > "${KEYS_DIR}/${name}.enc"
+}
+
+get()
+{
+	passphrase="$(prompt)"
+	for file in "$KEYS_DIR"/*.enc; do
+		# test if decrypting works
+		printf "%s" "$passphrase" | $DECRYPT "$file" 2> /dev/null > /dev/null || continue
+		# if yes, output the decrypted data
+		printf "%s" "$passphrase" | $DECRYPT "$file" 2> /dev/null
+		return 0
+	done
+	echo >&2 Error: Could not decrypt key
+	return 1
+}
+
+add()
+{
+	name="$1"
+	passphrase="$(prompt)"
+	for file in "$KEYS_DIR"/*.enc; do
+		# test if decrypting works
+		printf "%s" "$passphrase" | $DECRYPT "$file" 2> /dev/null > /dev/null || continue
+		# if yes, output the decrypted data
+		printf "%s" "$passphrase" | $DECRYPT "$file" 2> /dev/null | $ENCRYPT > "${KEYS_DIR}/${name}.enc"
+		return 0
+	done
+	echo >&2 Error: Could not decrypt key
+	return 1
+}
+
+del()
+{
+	name="$1"
+	delkey="$KEYS_DIR/${name}.enc"
+	passphrase="$(prompt)"
+	for file in "$KEYS_DIR"/*.enc; do
+		# do not check passphrase on the key we want to delete
+		[ "$(realpath "$file")" != "$(realpath "$delkey")" ] || continue
+		# verify passphrase
+		printf "%s" "$passphrase" | $DECRYPT "$file" 2>/dev/null > /dev/null || continue
+		rm "$delkey"
+		return 0
+	done
+	echo >&2 Error: Passphrase did not match any remaining keys
+	return 1
+}
+
+list()
+{
+	for file in "$KEYS_DIR"/*.enc; do
+		basename "${file%%.enc}"
+	done
+}
+
+prompt()
+{
+	opts="$(stty -g)"
+	trap 'stty "$opts"' EXIT
+	printf "%s" "$PROMPT:" >&2
+	stty -echo
+	read -r passphrase
+	stty "$opts"
+	trap - EXIT
+	printf "\n" >&2
+
+	printf "%s" "$passphrase"
+}
+
+case "${1-}" in
+	setup) shift; setup "${@}" ;;
+	get) shift; get "${@}" ;;
+	add) shift; add "${@}" ;;
+	del) shift; del "${@}" ;;
+	list) shift; list "${@}" ;;
+	*) usage 1 ;;
+esac
